@@ -1,0 +1,57 @@
+services:
+  smalltv-dashboard:
+    build:
+      context: .
+      args:
+        CODEX_ICON_URL: "${CODEX_ICON_URL:-https://persistent.oaistatic.com/codex/icon-gif.mp4}"
+    container_name: smalltv-dashboard
+    environment:
+      SMALLTV_HOST: "${SMALLTV_HOST:?Set SMALLTV_HOST in .env}"
+      CODEX_LOG_PATH: "${CODEX_LOG_PATH:-/var/lib/codex/logs_2.sqlite}"
+      CODEX_SESSIONS_PATH: "${CODEX_SESSIONS_PATH:-/var/lib/codex/sessions}"
+      CODEX_STATUS_PATH: "${CODEX_STATUS_PATH:-/var/lib/codex/codex-status.json}"
+      CODEX_STATUS_MAX_AGE_SECONDS: "${CODEX_STATUS_MAX_AGE_SECONDS:-420}"
+      CODEX_LOOKBACK_DAYS: "${CODEX_LOOKBACK_DAYS:-7}"
+      REFRESH_SECONDS: "${REFRESH_SECONDS:-30}"
+      GIF_FILENAME: "${GIF_FILENAME:-dashboard.gif}"
+      OUTPUT_PATH: "${OUTPUT_PATH:-/var/cache/smalltv-dashboard/dashboard.gif}"
+      UPLOAD_ENABLED: "${UPLOAD_ENABLED:-true}"
+      RUN_ONCE: "${RUN_ONCE:-false}"
+      TZ: "${TZ:-America/Sao_Paulo}"
+      DISPLAY_TZ: "${DISPLAY_TZ:-America/Sao_Paulo}"
+      FRAMES_PER_PAGE: "${FRAMES_PER_PAGE:-8}"
+      FRAME_MS: "${FRAME_MS:-700}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+    volumes:
+      - ./out:/var/cache/smalltv-dashboard
+      - type: bind
+        source: "${CODEX_HOST_LOG_PATH:?Set CODEX_HOST_LOG_PATH in .env}"
+        target: /var/lib/codex/logs_2.sqlite
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${CODEX_HOST_LOG_WAL_PATH:?Set CODEX_HOST_LOG_WAL_PATH in .env}"
+        target: /var/lib/codex/logs_2.sqlite-wal
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${CODEX_HOST_LOG_SHM_PATH:?Set CODEX_HOST_LOG_SHM_PATH in .env}"
+        target: /var/lib/codex/logs_2.sqlite-shm
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${CODEX_HOST_SESSIONS_PATH:?Set CODEX_HOST_SESSIONS_PATH in .env}"
+        target: /var/lib/codex/sessions
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${CODEX_HOST_STATUS_PATH:-./data/codex-status.json}"
+        target: /var/lib/codex/codex-status.json
+        read_only: true
+        bind:
+          create_host_path: false
+    restart: unless-stopped

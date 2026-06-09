@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.env
+out/
+data/codex-status.json
+app/assets/*.mp4
