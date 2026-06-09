@@ -49,7 +49,7 @@ services:
         bind:
           create_host_path: false
       - type: bind
-        source: "${CODEX_HOST_STATUS_PATH:-./data/codex-status.json}"
+        source: "${CODEX_HOST_STATUS_PATH:-${HOME}/.codex/codex-status.json}"
         target: /var/lib/codex/codex-status.json
         read_only: true
         bind:

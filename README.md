@@ -65,7 +65,7 @@ Host mount bindings:
 - `CODEX_HOST_LOG_WAL_PATH`
 - `CODEX_HOST_LOG_SHM_PATH`
 - `CODEX_HOST_SESSIONS_PATH`
-- `CODEX_HOST_STATUS_PATH` (optional, default `./data/codex-status.json`)
+- `CODEX_HOST_STATUS_PATH` (optional, defaults to `${HOME}/.codex/codex-status.json`)
 
 Build-time:
 - `CODEX_ICON_URL` (default `https://persistent.oaistatic.com/codex/icon-gif.mp4`) for Codex icon frames.
