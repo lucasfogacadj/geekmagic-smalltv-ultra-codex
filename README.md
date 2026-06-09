@@ -93,3 +93,25 @@ Optional:
 - `CODEX_STATUS_TIMEOUT` number of seconds to wait for command output
 
 The container prefers `/var/lib/codex/codex-status.json` when fresh; it falls back to local Codex session JSONL events if stale or missing.
+
+## Publish to GitHub
+
+Once the repository exists, run:
+
+```bash
+git init -b main
+git add .
+git commit -m "feat: initial"
+git remote add origin https://github.com/<YOUR_GITHUB_USER>/smalltv-dashboard.git
+git push -u origin main
+```
+
+If your setup requires HTTPS token auth, use:
+
+```bash
+export GITHUB_TOKEN=<your-token>
+git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/<YOUR_GITHUB_USER>/smalltv-dashboard.git"
+git push -u origin main
+```
+
+Use repository visibility setting on GitHub as desired (`public`).
