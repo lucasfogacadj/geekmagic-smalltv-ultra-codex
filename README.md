@@ -31,7 +31,7 @@ Minimum required variables:
 - `CODEX_HOST_LOG_SHM_PATH`
 - `CODEX_HOST_SESSIONS_PATH`
 
-`CODEX_HOST_STATUS_PATH` is optional and defaults to `./data/codex-status.json` if not set.
+`CODEX_HOST_STATUS_PATH` is optional and defaults to `${HOME}/.codex/codex-status.json` if not set.
 
 ### Run
 
@@ -89,7 +89,7 @@ systemctl --user enable --now codex-status-refresh.timer
 Edit `~/.config/smalltv-dashboard/codex-status-refresh.env` and point it to your local paths.
 
 Optional:
-- `CODEX_STATUS_CODEX_BIN` for a non-standard `codex` binary location
+- `CODEX_STATUS_CODEX_BIN` for a non-standard `codex` binary location. Set this to the path from `which codex` when using NVM.
 - `CODEX_STATUS_TIMEOUT` number of seconds to wait for command output
 
 The container prefers `/var/lib/codex/codex-status.json` when fresh; it falls back to local Codex session JSONL events if stale or missing.

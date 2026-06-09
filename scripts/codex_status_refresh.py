@@ -44,8 +44,11 @@ def run(command: list[str], timeout: int = 10, check: bool = True) -> subprocess
 
 
 def capture_pane(tmux: str, session: str) -> str:
-    result = run([tmux, "capture-pane", "-t", session, "-p", "-S", "-200"], timeout=5)
-    return result.stdout
+    try:
+        result = run([tmux, "capture-pane", "-t", session, "-p", "-S", "-200"], timeout=5)
+        return result.stdout
+    except subprocess.CalledProcessError:
+        return ""
 
 
 def wait_for_text(tmux: str, session: str, patterns: tuple[str, ...], timeout: int) -> str:
@@ -224,9 +227,11 @@ def parse_status(text: str, now: datetime) -> dict:
 
 def write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    with path.open("w", encoding="utf-8") as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
 
 
 def main() -> int:
