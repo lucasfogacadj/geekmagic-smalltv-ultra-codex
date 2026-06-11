@@ -2,8 +2,8 @@
 Description=Run Codex rate-limit status refresh every 5 minutes
 
 [Timer]
-OnBootSec=30s
-OnUnitInactiveSec=5min
+OnActiveSec=30s
+OnUnitActiveSec=5min
 AccuracySec=30s
 Persistent=true
 
