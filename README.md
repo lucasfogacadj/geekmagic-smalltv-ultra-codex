@@ -10,7 +10,9 @@ It renders a compact GIF with quota windows, token usage, model breakdowns, and 
 
 The device is then switched to theme `3`, so the generated dashboard becomes the active screen.
 
-![GeekMagic SmallTV Codex dashboard preview](out/dashboard.gif)
+## Live preview
+
+![GeekMagic SmallTV Codex dashboard preview](docs/dashboard.gif)
 
 ## What it shows
 
@@ -22,6 +24,12 @@ The device is then switched to theme `3`, so the generated dashboard becomes the
 | `Breakdown` | Input, cached, output, and reasoning token mix | Local Codex SQLite logs |
 | `7-day history` | Rolling usage sparkline | Local Codex SQLite logs |
 | `Models` | Token totals grouped by model | Local Codex SQLite logs |
+
+## Static screen gallery
+
+| 5h window | Weekly window |
+| --- | --- |
+| <img src="docs/screen-5h-window.png" width="180" alt="5h Codex usage window"> | <img src="docs/screen-week-window.png" width="180" alt="Weekly Codex usage window"> |
 
 ## Screen examples
 
