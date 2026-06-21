@@ -5,4 +5,5 @@ Description=Refresh Codex rate-limit status for SmallTV dashboard
 Type=oneshot
 EnvironmentFile=-%h/.config/smalltv-dashboard/codex-status-refresh.env
 Environment=TERM=xterm-256color
+TimeoutStartSec=240
 ExecStart=/bin/sh -lc 'exec /usr/bin/python3 "%h/smalltv-dashboard/scripts/codex_status_refresh.py"'

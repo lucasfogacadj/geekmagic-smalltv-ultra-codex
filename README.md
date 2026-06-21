@@ -195,6 +195,12 @@ systemctl --user daemon-reload
 systemctl --user enable --now codex-status-refresh.timer
 ```
 
+Keep the user timer alive after logout:
+
+```bash
+sudo loginctl enable-linger "$USER"
+```
+
 Edit the timer environment file:
 
 ```text
@@ -207,6 +213,7 @@ Useful options:
 | --- | --- |
 | `CODEX_STATUS_CODEX_BIN` | Full path to `codex` when it is not on the default PATH, common with NVM |
 | `CODEX_STATUS_TIMEOUT` | Seconds to wait for `/status` output |
+| `CODEX_STATUS_ATTEMPTS` | Number of attempts when the Codex TUI does not return `/status` cleanly |
 | `CODEX_STATUS_OUTPUT` | Output path for the parsed status JSON |
 | `CODEX_STATUS_CWD` | Working directory used when launching Codex |
 

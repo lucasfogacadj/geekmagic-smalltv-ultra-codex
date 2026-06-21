@@ -14,6 +14,7 @@ from pathlib import Path
 SESSION_PREFIX = "codex-status-refresh"
 DEFAULT_OUTPUT = Path.home() / ".codex" / "codex-status.json"
 DEFAULT_CODEX_BIN = "codex"
+DEFAULT_ATTEMPTS = 3
 
 
 def env_int(name: str, default: int) -> int:
@@ -51,6 +52,35 @@ def capture_pane(tmux: str, session: str) -> str:
         return ""
 
 
+def pane_state(tmux: str, session: str) -> str:
+    try:
+        result = run(
+            [
+                tmux,
+                "display-message",
+                "-p",
+                "-t",
+                session,
+                "dead=#{pane_dead} status=#{pane_dead_status} command=#{pane_current_command}",
+            ],
+            timeout=5,
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as err:
+        return (err.stderr or str(err)).strip()
+
+
+def wait_for_pane_activity(tmux: str, session: str, timeout: int) -> str:
+    deadline = time.monotonic() + timeout
+    text = ""
+    while time.monotonic() < deadline:
+        text = capture_pane(tmux, session)
+        if normalize_lines(text):
+            return text
+        time.sleep(1)
+    return text
+
+
 def wait_for_text(tmux: str, session: str, patterns: tuple[str, ...], timeout: int) -> str:
     deadline = time.monotonic() + timeout
     text = ""
@@ -62,30 +92,70 @@ def wait_for_text(tmux: str, session: str, patterns: tuple[str, ...], timeout: i
     return text
 
 
-def run_status(tmux: str, codex: str, cwd: str, timeout: int) -> str:
-    session = f"{SESSION_PREFIX}-{os.getpid()}"
+def send_completed_status(tmux: str, session: str) -> None:
+    run([tmux, "send-keys", "-t", session, "/"], timeout=5)
+    time.sleep(0.2)
+    run([tmux, "send-keys", "-t", session, "status"], timeout=5)
+    time.sleep(0.2)
+    run([tmux, "send-keys", "-t", session, "Tab"], timeout=5)
+    time.sleep(0.2)
+    run([tmux, "send-keys", "-t", session, "Enter"], timeout=5)
+
+
+def assert_rate_limits(text: str, tmux: str, session: str) -> str:
+    if "5h limit:" in text and "Weekly limit:" in text:
+        return text
+    tail = "\n".join(normalize_lines(text)[-12:])
+    state = pane_state(tmux, session)
+    raise RuntimeError(
+        "Codex /status output did not include rate limits"
+        f" (pane {state}):\n{tail}"
+    )
+
+
+def is_blocked_by_update_prompt(text: str) -> bool:
+    return (
+        "Update available!" in text
+        and "Skip until next version" in text
+        and ">_ OpenAI Codex" not in text
+    )
+
+
+def dismiss_update_prompt(tmux: str, session: str) -> None:
+    run([tmux, "send-keys", "-t", session, "3"], timeout=5)
+    time.sleep(0.2)
+    run([tmux, "send-keys", "-t", session, "Enter"], timeout=5)
+
+
+def run_status_attempt(tmux: str, codex: str, cwd: str, timeout: int, attempt: int) -> str:
+    session = f"{SESSION_PREFIX}-{os.getpid()}-{attempt}"
     run([tmux, "kill-session", "-t", session], check=False)
     try:
         run([tmux, "new-session", "-d", "-s", session, "-c", cwd, f"{codex} --no-alt-screen"], timeout=10)
-        wait_for_text(tmux, session, ("OpenAI Codex", "Tip:"), timeout=timeout)
+        initial_text = wait_for_pane_activity(tmux, session, min(timeout, 20))
+        if is_blocked_by_update_prompt(initial_text):
+            dismiss_update_prompt(tmux, session)
+            wait_for_text(tmux, session, ("OpenAI Codex",), timeout=min(timeout, 20))
         time.sleep(3)
 
         # Slash commands are accepted reliably in the TUI when completed first.
-        run([tmux, "send-keys", "-t", session, "/"], timeout=5)
-        time.sleep(0.2)
-        run([tmux, "send-keys", "-t", session, "status"], timeout=5)
-        time.sleep(0.2)
-        run([tmux, "send-keys", "-t", session, "Tab"], timeout=5)
-        time.sleep(0.2)
-        run([tmux, "send-keys", "-t", session, "Enter"], timeout=5)
-
+        send_completed_status(tmux, session)
         text = wait_for_text(tmux, session, ("5h limit:", "Weekly limit:"), timeout=timeout)
-        if "5h limit:" not in text or "Weekly limit:" not in text:
-            tail = "\n".join(normalize_lines(text)[-12:])
-            raise RuntimeError(f"Codex /status output did not include rate limits:\n{tail}")
-        return text
+        return assert_rate_limits(text, tmux, session)
     finally:
         run([tmux, "kill-session", "-t", session], check=False)
+
+
+def run_status(tmux: str, codex: str, cwd: str, timeout: int, attempts: int) -> str:
+    errors: list[str] = []
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            return run_status_attempt(tmux, codex, cwd, timeout, attempt)
+        except Exception as err:
+            errors.append(f"attempt {attempt}: {err}")
+            if attempt < attempts:
+                time.sleep(3)
+    raise RuntimeError("Codex /status refresh failed after retries:\n" + "\n".join(errors))
 
 
 def normalize_lines(text: str) -> list[str]:
@@ -240,8 +310,9 @@ def main() -> int:
     cwd = os.getenv("CODEX_STATUS_CWD", str(Path.home()))
     output = Path(os.getenv("CODEX_STATUS_OUTPUT", str(DEFAULT_OUTPUT)))
     timeout = env_int("CODEX_STATUS_TIMEOUT", 30)
+    attempts = env_int("CODEX_STATUS_ATTEMPTS", DEFAULT_ATTEMPTS)
 
-    text = run_status(tmux, codex, cwd, timeout)
+    text = run_status(tmux, codex, cwd, timeout, attempts)
     payload = parse_status(text, datetime.now(timezone.utc))
     write_json(output, payload)
     print(
