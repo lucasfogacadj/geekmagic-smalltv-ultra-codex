@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 import json
 import logging
 import math
@@ -9,7 +10,8 @@ import signal
 import sqlite3
 import sys
 import time
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urljoin
@@ -96,7 +98,7 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
-@dataclass
+@dataclass(slots=True)
 class Config:
     smalltv_host: str = os.getenv("SMALLTV_HOST", "192.168.1.100")
     codex_log_path: Path = Path(
@@ -166,9 +168,8 @@ class SmallTV:
         ).raise_for_status()
 
 
-@dataclass
+@dataclass(slots=True)
 class UsageEvent:
-    response_id: str
     ts: int
     model: str
     input_tokens: int
@@ -178,7 +179,7 @@ class UsageEvent:
     total_tokens: int
 
 
-@dataclass
+@dataclass(slots=True)
 class RateWindow:
     used_percent: float | None = None
     window_minutes: int | None = None
@@ -192,7 +193,7 @@ class RateWindow:
         return max(0.0, min(100.0, 100.0 - self.used_percent))
 
 
-@dataclass
+@dataclass(slots=True)
 class CodexRateLimits:
     source_path: Path | None = None
     updated_at: int | None = None
@@ -202,7 +203,7 @@ class CodexRateLimits:
     reached_type: str | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class CodexUsage:
     source_path: Path
     sessions_path: Path | None = None
@@ -230,6 +231,8 @@ class CodexUsage:
 
 
 class CodexUsageData:
+    COMPLETED_TARGET = "codex_api::endpoint::responses_websocket"
+    TURN_TARGET = "codex_core::session::turn"
     COMPLETED_MARKER = '{"type":"response.completed"'
     TURN_USAGE_RE = re.compile(r"(total_usage_tokens|estimated_token_count)=([^\s,}]+)")
     MODEL_RE = re.compile(r"\bmodel=([A-Za-z0-9_.:-]+)")
@@ -249,17 +252,19 @@ class CodexUsageData:
         self.status_max_age_seconds = max(0, status_max_age_seconds)
         self.display_tz = display_tz
         self.lookback_days = max(1, lookback_days)
+        self._usage_cache_signature: tuple[int | None, ...] | None = None
+        self._usage_cache: CodexUsage | None = None
+        self._completed_scan_max_id: int | None = None
+        self._completed_scan_found = False
+        self._rate_limit_cache_signature: tuple[Path, int, int] | None = None
+        self._rate_limit_cache: CodexRateLimits | None = None
 
     def collect(self) -> CodexUsage:
-        usage = CodexUsage(source_path=self.log_path, sessions_path=self.sessions_path)
-        events: list[UsageEvent] = []
         try:
-            with self._connect() as conn:
-                events = self._completed_events(conn)
-                if not events:
-                    events = self._turn_usage_events(conn)
+            usage = self._usage_from_logs()
         except Exception as err:
             logging.exception("failed to read Codex usage from %s", self.log_path)
+            usage = CodexUsage(source_path=self.log_path, sessions_path=self.sessions_path)
             usage.error = str(err)
 
         try:
@@ -268,9 +273,58 @@ class CodexUsageData:
             logging.exception("failed to read Codex rate limits from %s", self.sessions_path)
             usage.error = f"{usage.error}; {err}" if usage.error else str(err)
 
-        if not events:
+        return usage
+
+    def _usage_from_logs(self) -> CodexUsage:
+        with self._connect() as conn:
+            response_max_id = self._max_log_id(conn, self.COMPLETED_TARGET)
+            if (
+                self._usage_cache is not None
+                and self._usage_cache_signature == (response_max_id,)
+            ):
+                return self._clone_usage(self._usage_cache)
+
+            turn_max_id = self._max_log_id(conn, self.TURN_TARGET)
+            fallback_signature = (response_max_id, turn_max_id)
+            if (
+                self._usage_cache is not None
+                and self._usage_cache_signature == fallback_signature
+            ):
+                return self._clone_usage(self._usage_cache)
+
+            usage = CodexUsage(source_path=self.log_path, sessions_path=self.sessions_path)
+            completed_events = self._completed_events(conn, response_max_id)
+            if completed_events:
+                has_events = self._summarize_events(completed_events.values(), usage)
+                cache_signature = (response_max_id,)
+            else:
+                has_events = self._summarize_events(self._turn_usage_events(conn), usage)
+                cache_signature = fallback_signature
+
+            if has_events:
+                self._usage_cache_signature = cache_signature
+                self._usage_cache = self._clone_usage(usage)
             return usage
 
+    @staticmethod
+    def _clone_usage(usage: CodexUsage) -> CodexUsage:
+        return replace(
+            usage,
+            daily_tokens=list(usage.daily_tokens) if usage.daily_tokens is not None else None,
+            model_tokens=list(usage.model_tokens) if usage.model_tokens is not None else None,
+            rate_limits=None,
+            error=None,
+        )
+
+    @staticmethod
+    def _clone_rate_limits(rate_limits: CodexRateLimits) -> CodexRateLimits:
+        return replace(
+            rate_limits,
+            primary=replace(rate_limits.primary) if rate_limits.primary is not None else None,
+            secondary=replace(rate_limits.secondary) if rate_limits.secondary is not None else None,
+        )
+
+    def _summarize_events(self, events: Iterable[UsageEvent], usage: CodexUsage) -> bool:
         tz = safe_zoneinfo(self.display_tz)
         now = datetime.now(tz)
         today = now.date()
@@ -278,13 +332,15 @@ class CodexUsageData:
 
         day_totals = {start_day + timedelta(days=i): 0 for i in range(self.lookback_days)}
         model_totals: dict[str, int] = {}
-        latest = max(events, key=lambda event: event.ts)
+        latest: UsageEvent | None = None
 
         for event in events:
             event_date = datetime.fromtimestamp(event.ts, tz).date()
             usage.total_calls += 1
             usage.total_tokens += event.total_tokens
             model_totals[event.model] = model_totals.get(event.model, 0) + event.total_tokens
+            if latest is None or event.ts >= latest.ts:
+                latest = event
 
             if event_date == today:
                 usage.today_calls += 1
@@ -299,17 +355,20 @@ class CodexUsageData:
                 usage.week_tokens += event.total_tokens
                 day_totals[event_date] = day_totals.get(event_date, 0) + event.total_tokens
 
+        if latest is None:
+            return False
+
         usage.latest = latest
         usage.daily_tokens = [
             (day.strftime("%d/%m"), day_totals.get(day, 0))
             for day in sorted(day_totals)
         ]
-        usage.model_tokens = sorted(
+        usage.model_tokens = heapq.nlargest(
+            4,
             model_totals.items(),
             key=lambda item: item[1],
-            reverse=True,
-        )[:4]
-        return usage
+        )
+        return True
 
     def _connect(self) -> sqlite3.Connection:
         candidates = [self.log_path]
@@ -322,6 +381,15 @@ class CodexUsageData:
                 return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         raise FileNotFoundError(f"Codex log database not found: {self.log_path}")
 
+    @staticmethod
+    def _max_log_id(conn: sqlite3.Connection, target: str | None = None) -> int | None:
+        if target is None:
+            row = conn.execute("select max(id) from logs").fetchone()
+        else:
+            row = conn.execute("select max(id) from logs where target = ?", (target,)).fetchone()
+        value = row[0] if row else None
+        return int(value) if value is not None else None
+
     def _latest_rate_limits(self) -> CodexRateLimits | None:
         status_limits = self._status_rate_limits()
         if status_limits is not None:
@@ -332,11 +400,17 @@ class CodexUsageData:
             return None
 
         latest: tuple[int, Path, dict] | None = None
-        files = sorted(
-            sessions_root.rglob("*.jsonl"),
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
-        )[:40]
+        files = heapq.nlargest(40, sessions_root.rglob("*.jsonl"), key=file_mtime)
+        cache_signature = file_signature(files[0]) if files else None
+        if (
+            cache_signature is not None
+            and cache_signature == self._rate_limit_cache_signature
+            and self._rate_limit_cache is not None
+        ):
+            return refresh_expired_rate_limits(
+                self._clone_rate_limits(self._rate_limit_cache),
+                int(time.time()),
+            )
 
         for path in files:
             try:
@@ -362,7 +436,7 @@ class CodexUsageData:
             return None
 
         updated_at, source_path, rate_limits = latest
-        return refresh_expired_rate_limits(
+        result = refresh_expired_rate_limits(
             CodexRateLimits(
                 source_path=source_path,
                 updated_at=updated_at,
@@ -373,6 +447,9 @@ class CodexUsageData:
             ),
             int(time.time()),
         )
+        self._rate_limit_cache_signature = cache_signature
+        self._rate_limit_cache = self._clone_rate_limits(result)
+        return result
 
     def _status_rate_limits(self) -> CodexRateLimits | None:
         if self.status_max_age_seconds <= 0 or not self.status_path.exists():
@@ -411,16 +488,27 @@ class CodexUsageData:
                 return path
         return None
 
-    def _completed_events(self, conn: sqlite3.Connection) -> list[UsageEvent]:
+    def _completed_events(
+        self,
+        conn: sqlite3.Connection,
+        response_max_id: int | None,
+    ) -> dict[str, UsageEvent]:
+        if (
+            response_max_id is not None
+            and response_max_id == self._completed_scan_max_id
+            and not self._completed_scan_found
+        ):
+            return {}
+
         rows = conn.execute(
             """
             select id, ts, feedback_log_body
             from logs
-            where target = 'codex_api::endpoint::responses_websocket'
+            where target = ?
               and feedback_log_body like ?
             order by id
             """,
-            ("%response.completed%",),
+            (self.COMPLETED_TARGET, "%response.completed%"),
         )
         by_response: dict[str, UsageEvent] = {}
         decoder = json.JSONDecoder()
@@ -446,7 +534,6 @@ class CodexUsageData:
             total_tokens = to_int_value(usage.get("total_tokens")) or input_tokens + output_tokens
 
             by_response[response_id] = UsageEvent(
-                response_id=response_id,
                 ts=int(ts),
                 model=str(response.get("model") or "unknown"),
                 input_tokens=input_tokens,
@@ -456,19 +543,21 @@ class CodexUsageData:
                 total_tokens=total_tokens,
             )
 
-        return list(by_response.values())
+        self._completed_scan_max_id = response_max_id
+        self._completed_scan_found = bool(by_response)
+        return by_response
 
-    def _turn_usage_events(self, conn: sqlite3.Connection) -> list[UsageEvent]:
+    def _turn_usage_events(self, conn: sqlite3.Connection) -> Iterable[UsageEvent]:
         rows = conn.execute(
             """
             select id, ts, feedback_log_body
             from logs
-            where target = 'codex_core::session::turn'
+            where target = ?
               and feedback_log_body like '%post sampling token usage%'
             order by id
-            """
+            """,
+            (self.TURN_TARGET,),
         )
-        events: list[UsageEvent] = []
         for log_id, ts, body in rows:
             fields = dict(self.TURN_USAGE_RE.findall(body or ""))
             total_tokens = to_int_value(fields.get("total_usage_tokens"))
@@ -476,19 +565,30 @@ class CodexUsageData:
                 continue
             estimated = parse_optional_int(fields.get("estimated_token_count"))
             model_match = self.MODEL_RE.search(body or "")
-            events.append(
-                UsageEvent(
-                    response_id=f"turn-{log_id}",
-                    ts=int(ts),
-                    model=model_match.group(1) if model_match else "unknown",
-                    input_tokens=estimated,
-                    output_tokens=max(0, total_tokens - estimated),
-                    cached_tokens=0,
-                    reasoning_tokens=0,
-                    total_tokens=total_tokens,
-                )
+            yield UsageEvent(
+                ts=int(ts),
+                model=model_match.group(1) if model_match else "unknown",
+                input_tokens=estimated,
+                output_tokens=max(0, total_tokens - estimated),
+                cached_tokens=0,
+                reasoning_tokens=0,
+                total_tokens=total_tokens,
             )
-        return events
+
+
+def file_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return -1.0
+
+
+def file_signature(path: Path) -> tuple[Path, int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (path, stat.st_mtime_ns, stat.st_size)
 
 
 def refresh_expired_rate_limits(rate_limits: CodexRateLimits, now_ts: int) -> CodexRateLimits:
@@ -787,7 +887,8 @@ def load_codex_icon_frames() -> list[Image.Image]:
     frames: list[Image.Image] = []
     for path in sorted(CODEX_ICON_FRAMES.glob("frame-*.png")):
         try:
-            frames.append(remove_light_background(Image.open(path)))
+            with Image.open(path) as frame:
+                frames.append(remove_light_background(frame))
         except OSError:
             continue
     _CODEX_ICON_CACHE = frames
@@ -1086,34 +1187,38 @@ def render_gif(usage: CodexUsage, output_path: Path, config: Config) -> None:
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     durations = [config.frame_ms] * len(frames)
-    frames[0].save(
-        output_path,
-        save_all=True,
-        append_images=frames[1:],
-        duration=durations,
-        loop=0,
-        background=0,
-        optimize=True,
-        disposal=1,
-    )
-
-    if output_path.stat().st_size > config.max_gif_bytes:
-        logging.warning(
-            "GIF is %d bytes, above MAX_GIF_BYTES=%d; regenerating with fewer frames",
-            output_path.stat().st_size,
-            config.max_gif_bytes,
-        )
-        reduced = frames[::2] if len(frames) > 6 else frames
-        reduced[0].save(
+    try:
+        frames[0].save(
             output_path,
             save_all=True,
-            append_images=reduced[1:],
-            duration=[config.frame_ms * 2] * len(reduced),
+            append_images=frames[1:],
+            duration=durations,
             loop=0,
             background=0,
             optimize=True,
             disposal=1,
         )
+
+        if output_path.stat().st_size > config.max_gif_bytes:
+            logging.warning(
+                "GIF is %d bytes, above MAX_GIF_BYTES=%d; regenerating with fewer frames",
+                output_path.stat().st_size,
+                config.max_gif_bytes,
+            )
+            reduced = frames[::2] if len(frames) > 6 else frames
+            reduced[0].save(
+                output_path,
+                save_all=True,
+                append_images=reduced[1:],
+                duration=[config.frame_ms * 2] * len(reduced),
+                loop=0,
+                background=0,
+                optimize=True,
+                disposal=1,
+            )
+    finally:
+        for frame in frames:
+            frame.close()
 
 
 def display_now(timezone_name: str) -> datetime:
