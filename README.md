@@ -18,8 +18,7 @@ The device is then switched to theme `3`, so the generated dashboard becomes the
 
 | Screen | Purpose | Data source |
 | --- | --- | --- |
-| `5h window` | Remaining Codex usage in the rolling 5-hour window | Fresh `/status` snapshot when available |
-| `Weekly window` | Remaining weekly quota and reset time | Fresh `/status` snapshot when available |
+| `Usage window(s)` | Remaining Codex quota and reset time for every window reported by Codex | Fresh `/status` snapshot or session events |
 | `Today` | Tokens and calls used today | Local Codex SQLite logs |
 | `Breakdown` | Input, cached, output, and reasoning token mix | Local Codex SQLite logs |
 | `7-day history` | Rolling usage sparkline | Local Codex SQLite logs |
@@ -38,7 +37,7 @@ The device is then switched to theme `3`, so the generated dashboard becomes the
 ```text
 CODEx
 
-JANELA 05H
+JANELA SEMANA
 81% DISPONIVEL
 
 renova 14:42
@@ -98,7 +97,7 @@ The preferred quota source is the host-side `/status` snapshot:
 ~/.codex/codex-status.json
 ```
 
-If that file is missing or stale, the dashboard falls back to local Codex session JSONL events and SQLite usage logs.
+If that file is missing or stale, the dashboard falls back to local Codex session JSONL events and SQLite usage logs. Window slots are not assigned fixed meanings: current payloads can report a weekly window as `primary` with no `secondary`, while older payloads can report both 5-hour and weekly windows. The dashboard derives each label and page count from `window_minutes`.
 
 ## Requirements
 
@@ -177,7 +176,7 @@ out/dashboard.gif
 
 ## Refreshing quota state with `/status`
 
-For live quota percentages, install the user-level timer that periodically opens Codex, runs `/status`, parses the output, and writes:
+For live quota percentages, install the user-level timer that periodically opens Codex, runs `/status`, parses whichever supported windows are present (5-hour, weekly, or both), and writes:
 
 ```text
 ~/.codex/codex-status.json

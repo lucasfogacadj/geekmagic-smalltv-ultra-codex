@@ -752,6 +752,37 @@ def window_text(window: RateWindow | None) -> str:
     return f"{window.window_minutes}m"
 
 
+def rate_limit_windows(rate_limits: CodexRateLimits | None) -> list[RateWindow]:
+    if rate_limits is None:
+        return []
+    windows = [
+        window
+        for window in (rate_limits.primary, rate_limits.secondary)
+        if window is not None
+    ]
+    return sorted(
+        windows,
+        key=lambda window: window.window_minutes
+        if window.window_minutes is not None
+        else sys.maxsize,
+    )
+
+
+def rate_window_title(window: RateWindow | None) -> str:
+    minutes = window.window_minutes if window else None
+    if minutes == 300:
+        return "JANELA 05H"
+    if minutes == 10080:
+        return "JANELA SEMANA"
+    return f"JANELA {window_text(window).upper()}"
+
+
+def rate_window_accent(window: RateWindow | None, page: int) -> tuple[int, int, int]:
+    if window and window.window_minutes and window.window_minutes >= 10080:
+        return BLUE
+    return (GREEN, BLUE, VIOLET, PINK)[page % 4]
+
+
 def reset_text(window: RateWindow | None, tz: ZoneInfo) -> str:
     if window is None or not window.resets_at:
         return "--"
@@ -939,15 +970,16 @@ def draw_rate_screen(
     window: RateWindow | None,
     title: str,
     page: int,
+    total_pages: int,
     accent: tuple[int, int, int],
 ) -> Image.Image:
     image = Image.new("RGBA", (WIDTH, HEIGHT), BG + (255,))
     draw = ImageDraw.Draw(image)
     cyber_background(image, accent, phase)
-    header(draw, fonts, "Restante", page, now, total_pages=2)
+    header(draw, fonts, "Restante", page, now, total_pages=total_pages)
     rounded_panel(draw, (8, 31, 232, 228), outline=accent, radius=10)
 
-    if usage.rate_limits is None:
+    if window is None:
         draw_codex_icon(image, draw, fonts, (120, 64), accent, phase)
         draw_no_data(draw, fonts, usage)
         draw_scanlines(image, int(phase * 8))
@@ -972,17 +1004,6 @@ def draw_rate_screen(
 
     draw_scanlines(image, int(phase * 8))
     return image.convert("RGB")
-
-
-def page_primary_remaining(usage: CodexUsage, fonts: Fonts, phase: float, now: datetime) -> Image.Image:
-    window = usage.rate_limits.primary if usage.rate_limits else None
-    return draw_rate_screen(usage, fonts, phase, now, window, "JANELA 05H", 0, GREEN)
-
-
-def page_week_remaining(usage: CodexUsage, fonts: Fonts, phase: float, now: datetime) -> Image.Image:
-    window = usage.rate_limits.secondary if usage.rate_limits else None
-    return draw_rate_screen(usage, fonts, phase, now, window, "JANELA SEMANA", 1, BLUE)
-
 
 def sparkline_tokens(
     draw: ImageDraw.ImageDraw,
@@ -1056,9 +1077,9 @@ def page_today(usage: CodexUsage, fonts: Fonts, phase: float, now: datetime) -> 
         draw_no_data(draw, fonts, usage)
         return image.convert("RGB")
 
-    limits = usage.rate_limits
-    primary = limits.primary
-    secondary = limits.secondary
+    windows = rate_limit_windows(usage.rate_limits)
+    primary = windows[0] if windows else None
+    secondary = windows[1] if len(windows) > 1 else None
     primary_remaining = primary.remaining_percent if primary else None
     secondary_remaining = secondary.remaining_percent if secondary else None
     tz = now.tzinfo if isinstance(now.tzinfo, ZoneInfo) else safe_zoneinfo("UTC")
@@ -1076,9 +1097,10 @@ def page_today(usage: CodexUsage, fonts: Fonts, phase: float, now: datetime) -> 
     draw_text(draw, (22, 177), "RESET", fonts.label, MUTED)
     draw_text(draw, (218, 177), reset_text(primary, tz), fonts.body_bold, CYAN, "ra")
 
-    draw_text(draw, (22, 205), f"SEMANA {window_text(secondary)}", fonts.label, MUTED)
-    draw_text(draw, (218, 204), ratio_text(secondary_remaining), fonts.medium, BLUE, "ra")
-    progress_bar(draw, (22, 222, 218, 227), secondary_remaining, BLUE, phase)
+    if secondary is not None:
+        draw_text(draw, (22, 205), rate_window_title(secondary), fonts.label, MUTED)
+        draw_text(draw, (218, 204), ratio_text(secondary_remaining), fonts.medium, BLUE, "ra")
+        progress_bar(draw, (22, 222, 218, 227), secondary_remaining, BLUE, phase)
 
     draw_scanlines(image, int(phase * 8))
     return image.convert("RGB")
@@ -1175,13 +1197,25 @@ def render_gif(usage: CodexUsage, output_path: Path, config: Config) -> None:
     fonts = Fonts()
     now = display_now(config.display_tz)
     frames: list[Image.Image] = []
-    page_renderers = (page_primary_remaining, page_week_remaining)
+    windows: list[RateWindow | None] = rate_limit_windows(usage.rate_limits) or [None]
+    total_pages = len(windows)
 
-    for page_index, renderer in enumerate(page_renderers):
+    for page_index, window in enumerate(windows):
+        accent = rate_window_accent(window, page_index)
         for frame_index in range(config.frames_per_page):
             raw_phase = frame_index / max(1, config.frames_per_page - 1)
             phase = 1 - (1 - raw_phase) ** 3
-            frame = renderer(usage, fonts, phase, now)
+            frame = draw_rate_screen(
+                usage,
+                fonts,
+                phase,
+                now,
+                window,
+                rate_window_title(window),
+                page_index,
+                total_pages,
+                accent,
+            )
             frame = ImageEnhance.Sharpness(frame).enhance(1.2)
             frames.append(frame.convert("RGB").quantize(palette=GIF_PALETTE, dither=Image.Dither.NONE))
 

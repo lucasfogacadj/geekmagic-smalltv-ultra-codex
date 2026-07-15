@@ -15,6 +15,7 @@ SESSION_PREFIX = "codex-status-refresh"
 DEFAULT_OUTPUT = Path.home() / ".codex" / "codex-status.json"
 DEFAULT_CODEX_BIN = "codex"
 DEFAULT_ATTEMPTS = 3
+RATE_LIMIT_LABELS = (("5h limit:", 300), ("Weekly limit:", 10080))
 
 
 def env_int(name: str, default: int) -> int:
@@ -92,6 +93,19 @@ def wait_for_text(tmux: str, session: str, patterns: tuple[str, ...], timeout: i
     return text
 
 
+def wait_for_rate_limits(tmux: str, session: str, timeout: int) -> str:
+    deadline = time.monotonic() + timeout
+    text = ""
+    while time.monotonic() < deadline:
+        text = capture_pane(tmux, session)
+        try:
+            parse_status(text, datetime.now(timezone.utc))
+            return text
+        except RuntimeError:
+            time.sleep(1)
+    return text
+
+
 def send_completed_status(tmux: str, session: str) -> None:
     run([tmux, "send-keys", "-t", session, "/"], timeout=5)
     time.sleep(0.2)
@@ -103,8 +117,11 @@ def send_completed_status(tmux: str, session: str) -> None:
 
 
 def assert_rate_limits(text: str, tmux: str, session: str) -> str:
-    if "5h limit:" in text and "Weekly limit:" in text:
+    try:
+        parse_status(text, datetime.now(timezone.utc))
         return text
+    except RuntimeError:
+        pass
     tail = "\n".join(normalize_lines(text)[-12:])
     state = pane_state(tmux, session)
     raise RuntimeError(
@@ -140,7 +157,7 @@ def run_status_attempt(tmux: str, codex: str, cwd: str, timeout: int, attempt: i
 
         # Slash commands are accepted reliably in the TUI when completed first.
         send_completed_status(tmux, session)
-        text = wait_for_text(tmux, session, ("5h limit:", "Weekly limit:"), timeout=timeout)
+        text = wait_for_rate_limits(tmux, session, timeout=timeout)
         return assert_rate_limits(text, tmux, session)
     finally:
         run([tmux, "kill-session", "-t", session], check=False)
@@ -240,58 +257,66 @@ def parse_reset(text: str | None, now: datetime) -> int | None:
     return None
 
 
+def parse_limit_window(
+    lines: list[str],
+    index: int,
+    marker: str,
+    window_minutes: int,
+    now: datetime,
+) -> dict | None:
+    line = lines[index]
+    if marker.lower() not in line.lower():
+        return None
+
+    match = re.search(
+        r"(\d+(?:\.\d+)?)%\s+left(?:\s+\(resets ([^)]+)\))?",
+        line,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    remaining = max(0.0, min(100.0, float(match.group(1))))
+    reset_text = match.group(2)
+    if reset_text is None and index + 1 < len(lines):
+        reset_match = re.search(r"\(resets ([^)]+)\)", lines[index + 1], re.IGNORECASE)
+        if reset_match:
+            reset_text = reset_match.group(1)
+
+    return {
+        "used_percent": 100.0 - remaining,
+        "remaining_percent": remaining,
+        "window_minutes": window_minutes,
+        "resets_at": parse_reset(reset_text, now),
+    }
+
+
 def parse_status(text: str, now: datetime) -> dict:
     lines = normalize_lines(text)
-    primary: dict | None = None
-    secondary: dict | None = None
+    windows_by_minutes: dict[int, dict] = {}
     account: str | None = None
 
     for index, line in enumerate(lines):
         if "Account:" in line:
             account = line.split("Account:", 1)[1].strip()
 
-        if primary is None and "5h limit:" in line:
-            match = re.search(r"(\d+(?:\.\d+)?)%\s+left(?:\s+\(resets ([^)]+)\))?", line)
-            if match:
-                remaining = float(match.group(1))
-                primary = {
-                    "used_percent": max(0.0, min(100.0, 100.0 - remaining)),
-                    "remaining_percent": remaining,
-                    "window_minutes": 300,
-                    "resets_at": parse_reset(match.group(2), now),
-                }
+        for marker, window_minutes in RATE_LIMIT_LABELS:
+            window = parse_limit_window(lines, index, marker, window_minutes, now)
+            if window is not None:
+                windows_by_minutes[window_minutes] = window
 
-        if secondary is None and "Weekly limit:" in line:
-            match = re.search(r"(\d+(?:\.\d+)?)%\s+left(?:\s+\(resets ([^)]+)\))?", line)
-            if not match:
-                continue
-            remaining = float(match.group(1))
-            reset_text = match.group(2)
-            if reset_text is None and index + 1 < len(lines):
-                reset_match = re.search(r"\(resets ([^)]+)\)", lines[index + 1])
-                if reset_match:
-                    reset_text = reset_match.group(1)
-            secondary = {
-                "used_percent": max(0.0, min(100.0, 100.0 - remaining)),
-                "remaining_percent": remaining,
-                "window_minutes": 10080,
-                "resets_at": parse_reset(reset_text, now),
-            }
-
-        if primary is not None and secondary is not None:
-            break
-
-    if primary is None or secondary is None:
-        raise RuntimeError("Could not parse primary and weekly limits from Codex /status")
+    windows = [windows_by_minutes[key] for key in sorted(windows_by_minutes)]
+    if not windows:
+        raise RuntimeError("Could not parse any Codex usage limit from /status")
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "source": "codex_status",
         "updated_at": int(now.timestamp()),
         "updated_at_iso": now.isoformat(),
         "account": account,
-        "primary": primary,
-        "secondary": secondary,
+        "primary": windows[0],
+        "secondary": windows[1] if len(windows) > 1 else None,
     }
 
 
@@ -315,14 +340,12 @@ def main() -> int:
     text = run_status(tmux, codex, cwd, timeout, attempts)
     payload = parse_status(text, datetime.now(timezone.utc))
     write_json(output, payload)
-    print(
-        "wrote %s: 5h=%s%% week=%s%%"
-        % (
-            output,
-            payload["primary"]["remaining_percent"],
-            payload["secondary"]["remaining_percent"],
-        )
+    windows = [window for window in (payload["primary"], payload["secondary"]) if window]
+    summary = " ".join(
+        f'{window["window_minutes"]}m={window["remaining_percent"]}%'
+        for window in windows
     )
+    print(f"wrote {output}: {summary}")
     return 0
 
 
