@@ -10,7 +10,8 @@ import signal
 import sqlite3
 import sys
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -111,6 +112,7 @@ class Config:
         os.getenv("CODEX_STATUS_PATH", "/var/lib/codex/codex-status.json")
     )
     codex_status_max_age_seconds: int = env_int("CODEX_STATUS_MAX_AGE_SECONDS", 420)
+    codex_log_max_bytes: int = env_int("CODEX_LOG_MAX_BYTES", 1_000_000_000)
     refresh_seconds: int = env_int("REFRESH_SECONDS", 30)
     gif_filename: str = os.getenv("GIF_FILENAME", "dashboard.gif")
     output_path: Path = Path(
@@ -245,6 +247,7 @@ class CodexUsageData:
         status_max_age_seconds: int,
         display_tz: str,
         lookback_days: int,
+        log_max_bytes: int = 1_000_000_000,
     ) -> None:
         self.log_path = log_path
         self.sessions_path = sessions_path
@@ -252,6 +255,7 @@ class CodexUsageData:
         self.status_max_age_seconds = max(0, status_max_age_seconds)
         self.display_tz = display_tz
         self.lookback_days = max(1, lookback_days)
+        self.log_max_bytes = max(0, log_max_bytes)
         self._usage_cache_signature: tuple[int | None, ...] | None = None
         self._usage_cache: CodexUsage | None = None
         self._completed_scan_max_id: int | None = None
@@ -370,7 +374,8 @@ class CodexUsageData:
         )
         return True
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         candidates = [self.log_path]
         home_default = Path.home() / ".codex" / "logs_2.sqlite"
         if self.log_path != home_default:
@@ -378,7 +383,17 @@ class CodexUsageData:
 
         for path in candidates:
             if path.exists():
-                return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+                size = path.stat().st_size
+                if self.log_max_bytes and size > self.log_max_bytes:
+                    raise RuntimeError(
+                        f"Codex log database exceeds the {self.log_max_bytes}-byte safety limit: {path}"
+                    )
+                connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+                try:
+                    yield connection
+                finally:
+                    connection.close()
+                return
         raise FileNotFoundError(f"Codex log database not found: {self.log_path}")
 
     @staticmethod
@@ -1323,6 +1338,7 @@ def main() -> int:
         config.codex_status_max_age_seconds,
         config.display_tz,
         config.codex_lookback_days,
+        config.codex_log_max_bytes,
     )
     stop = StopFlag()
     signal.signal(signal.SIGTERM, stop.stop)

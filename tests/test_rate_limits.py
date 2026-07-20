@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -59,6 +60,48 @@ class StatusParserTests(unittest.TestCase):
 
 
 class DashboardWindowTests(unittest.TestCase):
+    def test_closes_the_log_database_after_collecting_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "logs.sqlite"
+            connection = sqlite3.connect(log_path)
+            connection.execute(
+                "create table logs (id integer primary key, ts integer, target text, feedback_log_body text)"
+            )
+            connection.commit()
+            connection.close()
+
+            data = dashboard.CodexUsageData(
+                log_path,
+                Path(temp_dir) / "sessions",
+                Path(temp_dir) / "status.json",
+                420,
+                "UTC",
+                7,
+            )
+            with data._connect() as opened:
+                self.assertEqual(opened.execute("select count(*) from logs").fetchone()[0], 0)
+
+            with self.assertRaises(sqlite3.ProgrammingError):
+                opened.execute("select 1")
+
+    def test_rejects_log_database_larger_than_safety_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "logs.sqlite"
+            log_path.write_bytes(b"SQLite format 3\\x00")
+            data = dashboard.CodexUsageData(
+                log_path,
+                Path(temp_dir) / "sessions",
+                Path(temp_dir) / "status.json",
+                420,
+                "UTC",
+                7,
+                log_max_bytes=8,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "safety limit"):
+                with data._connect():
+                    pass
+
     def test_uses_duration_instead_of_primary_secondary_slot(self) -> None:
         limits = dashboard.CodexRateLimits(
             primary=dashboard.RateWindow(used_percent=18, window_minutes=10080),
