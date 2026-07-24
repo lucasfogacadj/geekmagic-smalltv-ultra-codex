@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -116,6 +117,79 @@ class DashboardWindowTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "safety limit"):
                 with data._connect():
                     pass
+
+    def test_processes_only_new_completed_log_rows_after_initial_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "logs.sqlite"
+            connection = sqlite3.connect(log_path)
+            connection.execute(
+                "create table logs (id integer primary key, ts integer, target text, feedback_log_body text)"
+            )
+            connection.execute(
+                "insert into logs values (?, ?, ?, ?)",
+                (
+                    1,
+                    1_700_000_000,
+                    dashboard.CodexUsageData.COMPLETED_TARGET,
+                    self._completed_body("response-1", 10),
+                ),
+            )
+            connection.commit()
+
+            data = dashboard.CodexUsageData(
+                log_path,
+                Path(temp_dir) / "sessions",
+                Path(temp_dir) / "status.json",
+                420,
+                "UTC",
+                7,
+            )
+            with patch.object(dashboard, "safe_zoneinfo", return_value=timezone.utc):
+                first = data._usage_from_logs()
+
+                connection.execute(
+                    "insert into logs values (?, ?, ?, ?)",
+                    (2, 1_700_000_001, "unrelated", "ignored"),
+                )
+                connection.commit()
+                unrelated = data._usage_from_logs()
+
+                connection.execute(
+                    "insert into logs values (?, ?, ?, ?)",
+                    (
+                        3,
+                        1_700_000_002,
+                        dashboard.CodexUsageData.COMPLETED_TARGET,
+                        self._completed_body("response-2", 20),
+                    ),
+                )
+                connection.commit()
+                updated = data._usage_from_logs()
+            connection.close()
+
+            self.assertEqual(first.total_tokens, 10)
+            self.assertEqual(unrelated.total_tokens, 10)
+            self.assertEqual(updated.total_tokens, 30)
+            self.assertEqual(data._completed_scan_max_id, 3)
+            self.assertEqual(len(data._completed_events_cache), 2)
+
+    @staticmethod
+    def _completed_body(response_id: str, total_tokens: int) -> str:
+        return json.dumps(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": response_id,
+                    "model": "gpt-test",
+                    "usage": {
+                        "input_tokens": total_tokens,
+                        "output_tokens": 0,
+                        "total_tokens": total_tokens,
+                    },
+                },
+            },
+            separators=(",", ":"),
+        )
 
     def test_uses_duration_instead_of_primary_secondary_slot(self) -> None:
         limits = dashboard.CodexRateLimits(

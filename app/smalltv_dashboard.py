@@ -259,7 +259,7 @@ class CodexUsageData:
         self._usage_cache_signature: tuple[int | None, ...] | None = None
         self._usage_cache: CodexUsage | None = None
         self._completed_scan_max_id: int | None = None
-        self._completed_scan_found = False
+        self._completed_events_cache: dict[str, UsageEvent] = {}
         self._rate_limit_cache_signature: tuple[Path, int, int] | None = None
         self._rate_limit_cache: CodexRateLimits | None = None
 
@@ -281,32 +281,22 @@ class CodexUsageData:
 
     def _usage_from_logs(self) -> CodexUsage:
         with self._connect() as conn:
-            response_max_id = self._max_log_id(conn, self.COMPLETED_TARGET)
+            log_max_id = self._max_log_id(conn)
             if (
                 self._usage_cache is not None
-                and self._usage_cache_signature == (response_max_id,)
-            ):
-                return self._clone_usage(self._usage_cache)
-
-            turn_max_id = self._max_log_id(conn, self.TURN_TARGET)
-            fallback_signature = (response_max_id, turn_max_id)
-            if (
-                self._usage_cache is not None
-                and self._usage_cache_signature == fallback_signature
+                and self._usage_cache_signature == (log_max_id,)
             ):
                 return self._clone_usage(self._usage_cache)
 
             usage = CodexUsage(source_path=self.log_path, sessions_path=self.sessions_path)
-            completed_events = self._completed_events(conn, response_max_id)
+            completed_events = self._completed_events(conn, log_max_id)
             if completed_events:
                 has_events = self._summarize_events(completed_events.values(), usage)
-                cache_signature = (response_max_id,)
             else:
                 has_events = self._summarize_events(self._turn_usage_events(conn), usage)
-                cache_signature = fallback_signature
 
             if has_events:
-                self._usage_cache_signature = cache_signature
+                self._usage_cache_signature = (log_max_id,)
                 self._usage_cache = self._clone_usage(usage)
             return usage
 
@@ -506,26 +496,51 @@ class CodexUsageData:
     def _completed_events(
         self,
         conn: sqlite3.Connection,
-        response_max_id: int | None,
+        log_max_id: int | None,
     ) -> dict[str, UsageEvent]:
-        if (
-            response_max_id is not None
-            and response_max_id == self._completed_scan_max_id
-            and not self._completed_scan_found
-        ):
+        if log_max_id is None:
+            self._completed_scan_max_id = None
+            self._completed_events_cache.clear()
             return {}
 
-        rows = conn.execute(
-            """
-            select id, ts, feedback_log_body
-            from logs
-            where target = ?
-              and feedback_log_body like ?
-            order by id
-            """,
-            (self.COMPLETED_TARGET, "%response.completed%"),
-        )
-        by_response: dict[str, UsageEvent] = {}
+        if (
+            self._completed_scan_max_id is not None
+            and log_max_id < self._completed_scan_max_id
+        ):
+            self._completed_scan_max_id = None
+            self._completed_events_cache.clear()
+
+        if self._completed_scan_max_id is None:
+            rows = conn.execute(
+                """
+                select id, ts, feedback_log_body
+                from logs
+                where id <= ?
+                  and target = ?
+                  and feedback_log_body like ?
+                order by id
+                """,
+                (log_max_id, self.COMPLETED_TARGET, "%response.completed%"),
+            )
+        else:
+            rows = conn.execute(
+                """
+                select id, ts, feedback_log_body
+                from logs
+                where id > ?
+                  and id <= ?
+                  and target = ?
+                  and feedback_log_body like ?
+                order by id
+                """,
+                (
+                    self._completed_scan_max_id,
+                    log_max_id,
+                    self.COMPLETED_TARGET,
+                    "%response.completed%",
+                ),
+            )
+
         decoder = json.JSONDecoder()
 
         for log_id, ts, body in rows:
@@ -548,7 +563,7 @@ class CodexUsageData:
             output_tokens = to_int_value(usage.get("output_tokens"))
             total_tokens = to_int_value(usage.get("total_tokens")) or input_tokens + output_tokens
 
-            by_response[response_id] = UsageEvent(
+            self._completed_events_cache[response_id] = UsageEvent(
                 ts=int(ts),
                 model=str(response.get("model") or "unknown"),
                 input_tokens=input_tokens,
@@ -558,9 +573,8 @@ class CodexUsageData:
                 total_tokens=total_tokens,
             )
 
-        self._completed_scan_max_id = response_max_id
-        self._completed_scan_found = bool(by_response)
-        return by_response
+        self._completed_scan_max_id = log_max_id
+        return self._completed_events_cache
 
     def _turn_usage_events(self, conn: sqlite3.Connection) -> Iterable[UsageEvent]:
         rows = conn.execute(
