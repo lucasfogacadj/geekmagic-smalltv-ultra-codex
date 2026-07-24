@@ -60,6 +60,21 @@ class StatusParserTests(unittest.TestCase):
 
 
 class DashboardWindowTests(unittest.TestCase):
+    def test_log_database_size_limit_is_disabled_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "logs.sqlite"
+            log_path.write_bytes(b"SQLite format 3\x00")
+            data = dashboard.CodexUsageData(
+                log_path,
+                Path(temp_dir) / "sessions",
+                Path(temp_dir) / "status.json",
+                420,
+                "UTC",
+                7,
+            )
+
+            self.assertEqual(data.log_max_bytes, 0)
+
     def test_closes_the_log_database_after_collecting_usage(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             log_path = Path(temp_dir) / "logs.sqlite"

@@ -112,7 +112,7 @@ class Config:
         os.getenv("CODEX_STATUS_PATH", "/var/lib/codex/codex-status.json")
     )
     codex_status_max_age_seconds: int = env_int("CODEX_STATUS_MAX_AGE_SECONDS", 420)
-    codex_log_max_bytes: int = env_int("CODEX_LOG_MAX_BYTES", 1_000_000_000)
+    codex_log_max_bytes: int = env_int("CODEX_LOG_MAX_BYTES", 0)
     refresh_seconds: int = env_int("REFRESH_SECONDS", 30)
     gif_filename: str = os.getenv("GIF_FILENAME", "dashboard.gif")
     output_path: Path = Path(
@@ -247,7 +247,7 @@ class CodexUsageData:
         status_max_age_seconds: int,
         display_tz: str,
         lookback_days: int,
-        log_max_bytes: int = 1_000_000_000,
+        log_max_bytes: int = 0,
     ) -> None:
         self.log_path = log_path
         self.sessions_path = sessions_path

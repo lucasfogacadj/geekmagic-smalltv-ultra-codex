@@ -147,7 +147,7 @@ out/dashboard.gif
 | `CODEX_SESSIONS_PATH` | `/var/lib/codex/sessions` | Codex sessions path inside the container |
 | `CODEX_STATUS_PATH` | `/var/lib/codex/codex-status.json` | Mounted `/status` snapshot path |
 | `CODEX_STATUS_MAX_AGE_SECONDS` | `420` | Max age before `/status` is considered stale |
-| `CODEX_LOG_MAX_BYTES` | `1000000000` | Refuse to open a Codex log database larger than 1 GB, so the dashboard never retains an oversized deleted log file |
+| `CODEX_LOG_MAX_BYTES` | `0` | Optional Codex log database size limit in bytes; `0` disables the limit so normal long-lived logs keep updating |
 | `CODEX_LOOKBACK_DAYS` | `7` | Rolling history window |
 | `DISPLAY_TZ` | `America/Sao_Paulo` | Timezone used for display labels |
 | `REFRESH_SECONDS` | `30` | Render/upload interval |
